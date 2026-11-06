@@ -1,0 +1,12 @@
+This repository is released under CC0 1.0 (see LICENSE), except for the third-party material below.
+
+sim/sim.py and sim/search.py re-implement two priority formulas so that they can be replayed:
+- the slot-allocation formula of D. Franzen's ARC-AGI-3 Milestone 2 solution
+  (https://github.com/da-fr/arc-agi-3-solution), Apache-2.0
+- the D' priority formula by shiiin9
+  (https://www.kaggle.com/code/shiiin9/affectify-arc-31-54-in-a-single-sub), Apache-2.0
+Those formulas remain under their original licence.
+
+The notebooks that notebook_tools/ edits are not included. They build on D. Franzen's solution and
+Tufa Labs' Duck harness (https://github.com/Tufalabs/duck-harness), which keep their own terms.
+Model weights are not included.
