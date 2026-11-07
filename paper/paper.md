@@ -1,6 +1,6 @@
 # Measuring Before Improving: Variance, Compute Allocation and Cache Costs in an LLM Harness for ARC-AGI-3
 
-*Version 1.0 — 2026-11-07.*
+*Version 1.2 — 2026-11-07.*
 
 Kazuhiro Nakada (Kaggle: kazuhiro3381)
 
@@ -10,7 +10,7 @@ Linked Kaggle submission: ARC Prize 2026 — ARC-AGI-3, submission 57374366 (202
 
 ## Abstract
 
-Most ARC-AGI-3 entries in 2026 are variants of one public LLM harness, and the leaderboard cannot tell them apart: identical code scored between 21.8 and 29.9 points across 15 of our own resubmissions. We make this precise and build tools that work around it. (1) We measure the noise at three levels — leaderboard resubmissions (SD ≈ 3.9 across public copies), local evaluation (SD 16.5 points per game across passes, ±3.1 points for the difference of two 100-run evaluations) — and derive the smallest improvement a single evaluation can detect (about 5 points). (2) We build an offline trajectory-replay simulator for the harness's compute scheduler. It reproduces a real 8-hour run to within 0.03 points and is used to test scheduling changes without GPU time. Its main finding is negative: scheduler tunings worth +3 to +4 points on the trajectories they were fitted to are worth 0 or less on held-out trajectories. (3) We show that inference throughput is a low-noise measure of compute, not of score, that takes one hour, and use it to raise throughput 10.5% (14 concurrent streams + host-memory hierarchical KV cache) before saturation. (4) We measure what memory costs: appended summaries doubled prefill and cut throughput 30%, but a prefix-stable design that removed this cost did not recover the score, because each action took 53% more tokens. Our own prediction failed, and throughput alone cannot judge memory. (5) We price compute by replaying the run under scaled budgets, at about 0.2 points per 1% near the current budget and more below it: the appended design's loss needs no cause beyond compute, while the replacing design spent 105% of the tokens and scored like a 77% budget. (6) We document a platform failure mode (a 15-minute idle cut-off during slow model start-up) that turned four of our ten scored submissions into 0.00, and a keep-alive fix that was verified only locally. Six local evaluations (the base and five changes) span 43.96 to 50.46 with an SD of 2.48, matching the measurement noise of ±2.2: none of our changes is distinguishable from the base. The submitted entry scored 50.46 locally (the best of six) and 33.96 on the public leaderboard (the best of six scored runs, mean 24.63).
+Most ARC-AGI-3 entries in 2026 are variants of one public LLM harness, and the leaderboard cannot tell them apart: identical code scored between 21.8 and 29.9 points across 15 of our own resubmissions. We make this precise and build tools that work around it. (1) We measure the noise at three levels — leaderboard resubmissions (SD ≈ 3.9 across public copies), local evaluation (SD 16.5 points per game across passes, ±3.1 points for the difference of two 100-run evaluations) — and derive the smallest improvement a single evaluation can detect (about 5 points). (2) We build an offline trajectory-replay simulator for the harness's compute scheduler. It reproduces a real 8-hour run to within 0.03 points (0.15 with stitching) and is used to test scheduling changes without GPU time. Its main finding is negative: scheduler tunings worth +3 to +4 points on the trajectories they were fitted to are worth 0 or less on held-out trajectories. (3) We show that inference throughput is a low-noise measure of compute, not of score, that takes one hour, and use it to raise throughput 10.5% (14 concurrent streams + host-memory hierarchical KV cache) before saturation. (4) We measure what memory costs: appended summaries doubled prefill and cut throughput 30%, but a prefix-stable design that removed this cost did not recover the score, because each action took 53% more tokens. Our own prediction failed, and throughput alone cannot judge memory. Around a context drop, extra requests rise by 13.0 points (95% CI 10.4 to 15.7) when ≈8k tokens survive and by none when ≈56k or more survive, so the price is lost evidence, not the rebuild. (5) We price compute by replaying the run under scaled budgets, at about 0.2 points per 1% near the current budget and more below it: the appended design's loss needs no cause beyond compute, while the replacing design spent 105% of the tokens and scored like a 77% budget. (6) We document a platform failure mode (a 15-minute idle cut-off during slow model start-up) that turned four of our ten scored submissions into 0.00, and a keep-alive fix that was verified only locally. Six local evaluations (the base and five changes) span 43.96 to 50.46 with an SD of 2.48, matching the measurement noise of ±2.2: none of our changes is distinguishable from the base. The submitted entry scored 50.46 locally (the best of six) and 33.96 on the public leaderboard (the best of six scored runs, mean 24.63).
 
 ## 1. Introduction
 
@@ -33,7 +33,7 @@ This creates a measurement problem that matters for the whole field, not only fo
 - **Score-variance analyses** by skarin (local 4-pass evaluation; difference of 1.87 between pass-averages), Son Pham (distribution of LB scores of dfranzen copies, one submission per participant) and F. Liang (two identical 25×2 local runs; negative results for 14 streams and for a stall cut-off). We extend these to per-game variance and detectable effect sizes.
 - **A. Provorov, "The Book of Ideas"** (Kaggle notebook and dataset, published 2026-10-30): 145 experiments on the same base, each placed against repeated runs of the unchanged program, with a 5-submission noise estimate, a split of where the attainable score is lost, and the cost of slow model loading. It independently reaches several of our conclusions: the size of the noise (§5), the loss from 14 streams without a host cache (§6.2), the slow model load (§7) and where the score is lost (§8). It does not replay the scheduler, test settings on held-out trajectories, or account for prefix-cache invalidation; and its 14-stream test ran without the host KV cache.
 
-**Difference.** Previous work reports single scores of variants. We quantify the noise, build a simulator that separates scheduler effects from model stochasticity, and use mechanism-level diagnostics (cache, prefill, token flows) instead of scores to accept or reject changes.
+**Difference.** Son Pham, Liang and skarin report how much scores spread; we turn that into per-game variance, a detectable effect size and an acceptance rule. skarin audits one run's trajectories; we replay them under other schedulers and test on held-out runs. Provorov compares 145 variants by score against repeated base runs; we explain two variants' results through prefill, tokens per action and request logs, and convert such measurements to score with a budget curve. dfranzen reports summarization as inconclusive; we give the mechanism, though the score effect stays unresolved.
 
 ## 3. Setting and evaluation protocol
 
@@ -112,7 +112,7 @@ We replay the scheduler with 14 slots and the real time budget and score with th
 
 ### 6.2 Throughput as a low-noise proxy
 
-Throughput (generated tokens/s) varies little between runs and can be measured in 60 minutes, while score needs 8 hours and is noisy. We screened server configurations by throughput first (demo 25×4, 60 min each).
+Throughput (generated tokens/s) varies little between runs and can be measured in 60 minutes, while score needs 8 hours and is noisy. We screened server configurations by throughput first (demo 25×4, 60 min each; the full 8-hour `dp14` evaluation later ran at 639 tok/s).
 
 | | base (10 streams) | 14 streams + host KV cache 32 GB | 16 streams + host KV cache |
 |---|---|---|---|
@@ -176,6 +176,16 @@ The two runs behave alike until the first replacement and diverge after it. A re
 
 (A pattern match on the first 400 characters of reasoning, e.g. "re-ground", "re-orient", "re-read", "summary says", "let me verify". All five responses we drew at random and read in full did this: they restate the summary and check it against the frame before acting.) Requests that execute no action rise from 11% before the first replacement to 29% after it: 36% just after a replacement, and still 23% twenty requests later. With the appended design they stay at 15–21%, with no peak.
 
+**Is it the rebuild, or the lost evidence?** All three designs rebuild the context, and they differ in how much history survives, which gives a natural comparison. We took every drop of more than 20,000 prompt tokens and compared the 10 requests before it with the 10 after it (`analysis/event_study.py`; bootstrap over runs). The measure is the share of requests that do not advance the action counter, which is 1 − 1 / requests per decision, a broader measure than the no-action requests above. Only runs with real request logs count (44 of the appended design's 100, 97 of the replacing design's); the appended row has wide uncertainty for that reason.
+
+| Design, what survives a drop | Drops (runs) | Median tokens kept | Before | After | Change per run (95% CI) |
+|---|---|---|---|---|---|
+| Appended: history and summaries | 166 (31) | 94k | 54.4% | 52.3% | −5.3 (−11.0 to −1.1) |
+| `dp14`: history, no summary | 333 (83) | 56k | 52.2% | 54.4% | +1.8 (−1.4 to +5.0) |
+| Replacing: summary only | 406 (85) | 8k | 60.5% | 71.4% | **+13.0 (+10.4 to +15.7)** |
+
+This is the one result of this section whose interval clears zero by a wide margin. `dp14`'s trims rebuild the context and discard ≈59k tokens with no summary at all, and nothing changes, so neither the rebuild nor losing part of the history triggers re-checking. Only keeping almost nothing does. The comparison is between designs, not randomized, and the replacing design's kept tokens vary too little (7.8k to 9.0k) to show a dose within it. It also bears on the experiment proposed in §6.5: at 56k and above, no re-checking appears.
+
 The re-grounding spike is the visible part, not the bulk. Of ≈6.5M excess tokens, the longer responses just after a replacement account for ≈14%. About 90% is extra requests, not longer ones: the model keeps inspecting between actions.
 
 Three limits apply. The appended design has the same Python persistence and no excess (918 tokens per action), so persistence does not cause the extra tokens, but it was never evaluated alone for score. `dp14`'s text is no longer available, so the text control is the appended design, not `dp14`. And we show what the tokens were spent on, not that re-checking lowered the score. The robust conclusion is that removing a mechanism's compute cost does not show that the mechanism helps, and throughput cannot judge memory.
@@ -191,7 +201,7 @@ Actions obey an identity: `actions = time × r / c`, with r generated tokens per
 | Replay | 35.66 | 41.39 | 45.14 | 48.92 | 50.58 | 52.94 | 56.58 |
 | The real `dp14` run, cut at that time | 35.81 | 40.60 | 44.17 | 47.80 | 50.46 | — | — |
 
-The replay and the real run cut early agree within 1.1 points, with no fitting. Above 100% the curve rests on stitching alone and is unvalidated.
+The replay and the real run cut early agree within 1.1 points, with no fitting. The shape replicates on the other two evaluations, using real cuts and no simulator: cut to 90% and 70% of the time, `dp14` loses 2.7 and 9.9 points, D′ 2.5 and 10.5, and temperature 0.6 1.5 and 6.8. Above 100% the curve rests on stitching alone and is unvalidated.
 
 ![Figure 2. Replay of dp14 under scaled budgets, real early cuts of the same run, and the three actual evaluations.](fig/budget_curve.png)
 
@@ -209,6 +219,20 @@ The replay and the real run cut early agree within 1.1 points, with no fitting. 
 **The appended design's loss needs no cause beyond compute.** At 70% of the tokens the replay predicts 41.62 and the design scored 43.96. So our first explanation (§6.4) stands for that design; what failed was its extension to the prediction that a prefix-stable design would recover the score. Without the simulator the check points the same way: the three evaluations without memory, cut at 13.24M tokens, stand at 39.70, 38.69 and 40.60 (below the replay, because a run cut early never reached its end-game scheduling).
 
 **The replacing design paid the same bill elsewhere.** It spent 105% of the tokens and scored what `dp14` would score with 77%. It lies between its two bounds: if re-checking tokens were worth nothing it would sit at the equal-actions value (37.42), and if they were worth as much as `dp14`'s it would sit at the equal-tokens value (51.65). The point estimate is about half way.
+
+**Re-anchoring the curve.** `dp14` is the best of six, so we also compare every evaluation with the curve at its own token count, and let the three evaluations without memory set the offset.
+
+| Evaluation | Tokens vs `dp14` | Curve | Actual | Residual | Against the offset of −2.2 |
+|---|---|---|---|---|---|
+| Temperature 0.6 | 93% | 49.59 | 44.77 | −4.8 | no memory |
+| D′ | 92% | 49.48 | 47.84 | −1.6 | no memory |
+| `dp14` | 100% | 50.58 | 50.46 | −0.1 | no memory |
+| Appended | 70% | 41.62 | 43.96 | +2.3 | **+4.5** |
+| Replacing | 105% | 51.65 | 44.54 | −7.1 | **−4.9** |
+
+The three evaluations without memory scatter by about what one evaluation's noise predicts (SD 2.4 against ±2.2), and one of them reaches −4.8. So the replacing design's residual is suggestive, not exceptional. The two memory designs do fall on opposite sides of the curve, as the two-price account says: one pays before the tokens are generated, the other in the tokens themselves.
+
+**A falsifiable next experiment.** The account predicts which design should be free of both prices: keep the ≈56k verbatim tokens that a trim keeps, and write one summary only at the trim, where the prefix is rebuilt anyway. Prefill should stay near 60M, and if re-checking comes from lost evidence, tokens per action should stay near 900 and actions near 21,000. Then, for the first time, the score would measure what memory itself is worth. If tokens per action rise anyway, the summary rather than the lost evidence triggers re-checking. We did not run this design.
 
 **Limits.** We did this after seeing the results. Every interval includes zero. `dp14` is the best of six evaluations, so the curve is probably too high by a few points, which would widen the appended design's lead and narrow the replacing design's deficit. The curve assumes that progress depends only on tokens and actions, and that tokens removed from one design would be worth what they were worth in `dp14`. Equal actions uses the replay's action count, which is approximate where runs were stitched.
 
@@ -233,7 +257,7 @@ From mid-October, model loading on the evaluation machines slowed from ≈5 to �
 
 - **Evaluation is the bottleneck.** With per-game SD ≈ 16.5, a change must be worth ≈5 points to be seen in one 8-hour evaluation. Most published tweaks are worth 1–2. Progress requires either more evaluations, held-out game sets (e.g. independent parametric game collections), or mechanism-level proxies such as throughput and token accounting.
 - **Allocation is nearly exhausted** in this harness: even a future-knowing oracle gains only ≈ +2.7, and apparent scheduler gains are fitted noise. **Total compute is not:** it is worth ≈ 0.2 points per 1% near the current budget (§6.5), so a replay curve turns a mechanism measurement into a predicted score, without the noise of an evaluation.
-- **The remaining headroom is in solving ability**, i.e. what the model learns per token — not in how tokens are distributed. Provorov's split of 132 runs agrees: 46.5% of the attainable score lies in levels never reached, 10.5% in the level where the run stopped and only 2.5% in extra actions on cleared levels; and 93% of level clears happen within the first 70,000 tokens spent on the level. Memory mechanisms must be judged by what they cost in prefill and in reasoning per action, not by the information they keep or their length.
+- **The remaining headroom is in solving ability**, i.e. what the model learns per token — not in how tokens are distributed. §6.5 names the next experiment on memory. Provorov's split of 132 runs agrees: 46.5% of the attainable score lies in levels never reached, 10.5% in the level where the run stopped and only 2.5% in extra actions on cleared levels; and 93% of level clears happen within the first 70,000 tokens spent on the level. Memory mechanisms must be judged by what they cost in prefill and in reasoning per action, not by the information they keep or their length.
 - **Robustness is part of the score.** A long-start-up failure turned a 30-point agent into 0.00 in four of ten submissions; harnesses should treat platform latency as an adversary.
 
 **Universality.** Nothing in this method is specific to ARC. Any LLM agent running long shared contexts under a fixed GPU budget can apply it in three steps. (1) Before testing changes, estimate the detectable effect from per-episode variance. (2) Log each request's generated tokens, uncached input tokens and milestones; fit the one-line timing model; replay the scheduler; and test every tuning on held-out episodes. (3) Price a memory mechanism by the prefill it forces and the extra requests it triggers, not by what it stores, and convert those costs to score with a replay budget curve.
@@ -244,7 +268,8 @@ We did not build a new ARC-AGI-3 solver. We measured how much the dominant publi
 
 ## Reproducibility and license
 
-- Code: notebooks and tools in https://github.com/cacco2010-maker/arc3-measuring-before-improving : `_make_nb.py` (variant generator), `sim/` (replay simulator: `build_dataset.py`, `timing.py`, `sim.py`, `search.py`, `eval_all.py`), `analysis/` (`memory_cost.py` for §5.2 and §6.4, `budget_curve.py` for §6.5, `wallclock_check.py` for §6.1), `_keepalive_cell.py`, `_no_trial_cell.py`.
+- Code: notebooks and tools in https://github.com/cacco2010-maker/arc3-measuring-before-improving : `_make_nb.py` (variant generator), `sim/` (replay simulator: `build_dataset.py`, `timing.py`, `sim.py`, `search.py`, `eval_all.py`), `analysis/` (`memory_cost.py` for §5.2 and §6.4, `event_study.py` for §6.4, `budget_curve.py` for §6.5, `wallclock_check.py` for §6.1), `_keepalive_cell.py`, `_no_trial_cell.py`.
+- Data: `sim/dataset.pkl` holds the numeric trajectories of `dp14` (from its request logs), D′ and `t06` (from run records; per-request timing approximated). `data/memory_trajectories.pkl` holds those of the two memory designs. `data/summaries/` holds the per-game results. All are numbers and game names only. `dp14`'s response text no longer exists. `sumtrimB`'s raw logs are in its public notebook; the appended design's notebook is not public.
 - License: the Kaggle notebook is public under Apache-2.0 (Kaggle's licence for public notebooks); our tools outside it CC0, except the third-party formulas re-implemented in `sim/` (Apache-2.0; see NOTICE in the repository).
 - Third-party code:
   - dfranzen's harness patches and serving builder: Apache-2.0 (github da-fr/arc-agi-3-solution, a fork of Tufalabs/duck-harness). The Kaggle copies (`dfranzen/taaf-kaggle-source-bundle-copy`, `dfranzen/pennyroyal-v253`) are listed as "unknown"; the wheelhouse states that bundled packages keep their upstream licenses.

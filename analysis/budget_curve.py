@@ -106,6 +106,15 @@ def main():
     print('dp14 really cut at f:', out['real_cuts'])
     for name in ('t06-v2', 'dprime-v1', 'arc3-dp14-v1'):
         print(f'{name:13} cut at 13.24M tokens {cut(data[name], 1, 13.24):.2f}, at 14,420 actions {cut(data[name], 2, 14420):.2f}')
+    for name in ('t06-v2', 'dprime-v1', 'arc3-dp14-v1'):
+        print(f'{name:13} real loss when cut at 90% / 70% of the time:', *(f'{cut_time(data[name], f) - cut_time(data[name], 1.01):+.2f}' for f in (.9, .7)))
+    # residuals from the curve at each evaluation's own token count; the three evaluations without memory set the offset
+    fs, ss = [r['f'] for r in res], [r['score'] for r in res]
+    ev = {'t06': (17.49, 44.77), 'dprime': (17.40, 47.84), 'dp14': (18.84, 50.46), 'appended': (13.24, 43.96), 'replacing': (19.70, 44.54)}
+    resid = {k: a - float(np.interp(t / DP14_TOKENS, fs, ss)) for k, (t, a) in ev.items()}
+    off = float(np.mean([resid[k] for k in ('t06', 'dprime', 'dp14')]))
+    print('residuals', {k: round(v, 2) for k, v in resid.items()}, 'offset', round(off, 2))
+    out['residuals'] = resid; out['offset'] = off
     json.dump(out, open(os.path.join(ROOT, 'analysis/budget_curve.json'), 'w'), indent=1)
 
 
