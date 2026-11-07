@@ -17,6 +17,7 @@ compute allocation and cache costs in an LLM harness for ARC-AGI-3*.
 | `analysis/budget_curve.py` | Section 6.5: score against compute budget, and the memory designs at matched tokens and actions |
 | `analysis/event_study.py` | Section 6.4: requests around a context drop, by how much history survives. Uses `data/memory_trajectories.pkl` (numbers only) |
 | `analysis/external_check.py` | Section 5.3: the noise model on tantan0327's public runs (download their CC0 dataset first) |
+| `analysis/external_holdout.py` | Section 6.1: the dp14-tuned scheduler on tantan0327's public trajectories (download their CC0 dataset first) |
 | `analysis/wallclock_check.py` | Section 6.1: tests the replay's assumption that a level's cost does not depend on when it is played |
 | `data/summaries/` | Per-game scores of four evaluations |
 | `notebook_tools/` | Variant generator and keep-alive cells. They edit a copy of the base notebook, which is not included. Comments are in Japanese |
