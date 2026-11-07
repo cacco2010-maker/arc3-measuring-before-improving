@@ -15,6 +15,7 @@ compute allocation and cache costs in an LLM harness for ARC-AGI-3*.
 | `sim/dataset.pkl` | Trajectories of three evaluations: plain lists, dicts, numbers and game names. Load pickles only from sources you trust |
 | `analysis/memory_cost.py` | Sections 5.2 and 6.4: noise across evaluations, cost of memory designs, re-grounding counts |
 | `analysis/budget_curve.py` | Section 6.5: score against compute budget, and the memory designs at matched tokens and actions |
+| `analysis/wallclock_check.py` | Section 6.1: tests the replay's assumption that a level's cost does not depend on when it is played |
 | `data/summaries/` | Per-game scores of four evaluations |
 | `notebook_tools/` | Variant generator and keep-alive cells. They edit a copy of the base notebook, which is not included. Comments are in Japanese |
 | `paper/` | Paper sources and figures |
@@ -28,6 +29,7 @@ python sim/sim.py
 python sim/eval_all.py
 python analysis/memory_cost.py
 python analysis/budget_curve.py
+python analysis/wallclock_check.py
 ```
 
 `sim/sim.py` replays the scheduler (D' gives 50.43; the real run scored 50.46). `sim/search.py` includes the future-knowing oracle.
