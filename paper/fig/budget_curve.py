@@ -1,9 +1,10 @@
 """Figure 2: what a compute budget buys (replay of dp14, data from release/analysis/budget_curve.json)."""
-import json, matplotlib
+import json, os, matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-d = json.load(open("../../release/analysis/budget_curve.json"))
+src = "../../analysis/budget_curve.json"  # in the working folder the repository sits in release/
+d = json.load(open(src if os.path.exists(src) else "../../release/analysis/budget_curve.json"))
 f = [r["f"] for r in d["curve"]]
 s = [r["score"] for r in d["curve"]]
 BLUE, ORANGE, GRAY, INK = "#4c72b0", "#dd8452", "#8c8c8c", "#333333"
