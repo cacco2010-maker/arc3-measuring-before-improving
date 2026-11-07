@@ -1,6 +1,6 @@
 # Measuring Before Improving: Variance, Compute Allocation and Robustness in an LLM Harness for ARC-AGI-3
 
-*Version 0.8 — 2026-11-07.*
+*Version 0.9 — 2026-11-07.*
 
 Kazuhiro Nakada (Kaggle: kazuhiro3381)
 
@@ -10,7 +10,7 @@ Linked Kaggle submission: ARC Prize 2026 — ARC-AGI-3, submission 57374366 (202
 
 ## Abstract
 
-Most ARC-AGI-3 entries in 2026 are variants of one public LLM harness, and the leaderboard cannot tell them apart: identical code scored between 21.8 and 29.9 points across 15 of our own resubmissions. We make this precise and build tools that work around it. (1) We measure the noise at three levels — leaderboard resubmissions (SD ≈ 3.9 across public copies), local evaluation (SD 16.5 points per game across passes, ±3.1 points for the difference of two 100-run evaluations) — and derive the smallest improvement a single evaluation can detect (about 5 points). (2) We build an offline trajectory-replay simulator for the harness's compute scheduler. It reproduces a real 8-hour run to within 0.03 points and is used to test scheduling changes without GPU time. Its main finding is negative: scheduler tunings worth +3 to +4 points on the trajectories they were fitted to are worth 0 or less on held-out trajectories. (3) We show that inference throughput is a low-noise measure of compute, not of score, that takes one hour, and use it to raise throughput 10.5% (14 concurrent streams + host-memory hierarchical KV cache) before saturation. (4) We measure what memory costs: appended summaries doubled prefill and cut throughput 30%, but a prefix-stable design that removed this cost did not recover the score, because each action took 53% more tokens. Our own prediction failed, and compute alone cannot judge memory. (5) We document a platform failure mode (a 15-minute idle cut-off during slow model start-up) that turned four of our ten completed runs into 0.00, and a keep-alive fix that was verified only locally. Six local evaluations of five changes span 43.96 to 50.46 with an SD of 2.48, matching the measurement noise of ±2.2: none of our changes is distinguishable from the base. The submitted entry scored 50.46 locally (the best of six) and 33.96 on the public leaderboard (the best of six scored runs, mean 24.63).
+Most ARC-AGI-3 entries in 2026 are variants of one public LLM harness, and the leaderboard cannot tell them apart: identical code scored between 21.8 and 29.9 points across 15 of our own resubmissions. We make this precise and build tools that work around it. (1) We measure the noise at three levels — leaderboard resubmissions (SD ≈ 3.9 across public copies), local evaluation (SD 16.5 points per game across passes, ±3.1 points for the difference of two 100-run evaluations) — and derive the smallest improvement a single evaluation can detect (about 5 points). (2) We build an offline trajectory-replay simulator for the harness's compute scheduler. It reproduces a real 8-hour run to within 0.03 points and is used to test scheduling changes without GPU time. Its main finding is negative: scheduler tunings worth +3 to +4 points on the trajectories they were fitted to are worth 0 or less on held-out trajectories. (3) We show that inference throughput is a low-noise measure of compute, not of score, that takes one hour, and use it to raise throughput 10.5% (14 concurrent streams + host-memory hierarchical KV cache) before saturation. (4) We measure what memory costs: appended summaries doubled prefill and cut throughput 30%, but a prefix-stable design that removed this cost did not recover the score, because each action took 53% more tokens. Our own prediction failed, and throughput alone cannot judge memory. (5) We price compute by replaying the run under scaled budgets, at about 0.2–0.3 points per 1%: the appended design's loss needs no cause beyond compute, while the replacing design spent 105% of the tokens and scored like a 77% budget. (6) We document a platform failure mode (a 15-minute idle cut-off during slow model start-up) that turned four of our ten completed runs into 0.00, and a keep-alive fix that was verified only locally. Six local evaluations (the base and five changes) span 43.96 to 50.46 with an SD of 2.48, matching the measurement noise of ±2.2: none of our changes is distinguishable from the base. The submitted entry scored 50.46 locally (the best of six) and 33.96 on the public leaderboard (the best of six scored runs, mean 24.63).
 
 ## 1. Introduction
 
@@ -72,9 +72,9 @@ The unchanged base ranges over 8 points. An independent set of five unchanged su
 
 Per game, the SD across the 4 passes averages **16.5 points** (root mean square 22.0, which is what sets the standard error). Matched per-game differences between two versions swing ±50 (e.g. one game −51.7, another +31.2) while the averages differ by only −1.73. Propagating per-game variance gives a standard error of ≈ ±2.2 points for one demo-25×4 average and **±3.1 for the difference of two**. An independent measurement agrees: Liang ran the unchanged notebook twice (25 games × 2 passes) and found a per-game SD of 24.0 for the difference; for two-pass means our RMS of 22.0 predicts 22. Provorov reports the same effect at the level of a whole test: identical code cleared 54 and 45 of 72 levels in two 30-minute runs on ten public games.
 
-Consequence for a decision rule "accept if mean ≥ baseline + 2": a change with zero true effect is accepted ≈ 26% of the time; a change with a true +2 effect is accepted only ≈ 50%. **One weekly evaluation can only resolve ≈ 5-point effects.** This determined our strategy: prefer candidates that are large if they work, and use cheaper, lower-noise proxies (§6.2) whenever possible.
+Consequence for a decision rule "accept if mean ≥ baseline + 2": a change with zero true effect is accepted ≈ 26% of the time; a change with a true +2 effect is accepted only ≈ 50%. **One weekly evaluation can only resolve ≈ 5-point effects** (1.645 × 3.1 at 95% one-sided; 4 points at the 90% used in §5.1). This determined our strategy: prefer candidates that are large if they work, and use cheaper, lower-noise proxies (§6.2) whenever possible.
 
-The six evaluations we ran show what this means in practice:
+The six evaluations show what this means in practice. Five are ours. The base row is dfranzen's own v3 evaluation under the same protocol, read from the 100 run records in skarin's audit notebook, so we have no server logs for it.
 
 | Evaluation | Change from base | Mean | Actions | Generated tok/s |
 |---|---|---|---|---|
@@ -99,10 +99,10 @@ Most remaining headroom appeared to be in allocation: tokens were spread almost 
 
 We replay the scheduler with 14 slots and the real time budget and score with the official formula. Runs cut off by the deadline are extended by **stitching**: the continuation is drawn from other passes of the same game from the same level onward (including passes that never cleared it, so success rates are preserved).
 
-**Validation.** Replaying D′ gives 50.43 (actual 50.46); 99 of 100 runs reach the same number of levels; the median error in the time of the last level-up is 5 minutes. Replaying the original dfranzen formula gives 47.90, consistent in sign with the measured D′ gain (replayed +2.7 against 50.61, measured +1.35, which is inside the noise).
+**Validation.** Replaying D′ without stitching gives 50.43 (actual 50.46); 99 of 100 runs reach the same number of levels; the median error in the time of the last level-up is 5 minutes. With stitching, the reference for every comparison below, D′ gives 50.61. Replaying the original dfranzen formula gives 47.90, consistent in sign with the measured D′ gain (replayed +2.7, measured +1.35, which is inside the noise).
 
 **Findings.**
-- A greedy oracle that knows each trajectory's future reaches 53.33, against 50.61 for D′ with the same stitching: even perfect allocation is worth only ≈ +2.7 on these trajectories. Cutting the budget by 10% costs D′ 1.6 points and the oracle 0.6: the budget is close to sufficient.
+- A greedy oracle that knows each trajectory's future reaches 53.33, against 50.61 for D′ with the same stitching: even perfect allocation is worth only ≈ +2.7 on these trajectories. Cutting the budget by 10% costs D′ 1.6 points and the oracle 0.6; larger cuts cost far more (§6.5).
 - On the `dp14` trajectories, individual tweaks (linear floor 0.3, token scale 450k, headroom on the final level) each gain ≈ +2, and the best random-search settings gain **+3 to +4** (18 of 20 bootstrap game resamples positive).
 - **On held-out trajectories from two other evaluations, the same settings gain 0 or less** (best setting: +3.6 on `dp14`, −2.6 and −1.3 on the others). Those two evaluations kept no request logs, so their per-request timing is approximated from generated tokens; their actions, tokens and level clears are real. Only one tweak was non-negative on both (+0.2 / −0.1).
 
@@ -121,7 +121,7 @@ Throughput (generated tokens/s) varies little between runs and can be measured i
 | Server queue non-empty | 4% | 91% | 50% |
 | Prefix-cache hit rate | 93% | 91% | 89% |
 
-Beyond 14 streams the GPU saturates (KV utilisation near its limit), so we stopped there. The host-memory cache appears to be what makes 14 streams pay. Liang raised the stream count from 10 to 14 *without* it and lost 17 points (29.90 vs 47.30); generated throughput fell from ≈610 to ≈280 tok/s late in the run as growing contexts no longer fit in GPU KV memory. That run was on a different machine with slower disk, so the comparison is suggestive, not controlled. Provorov's leaderboard test points the same way: 14 requests *without* the host cache scored 21.49, against 28.04 for the unchanged base submitted the day before, although a bench without games had shown +10.5% throughput. Both reports of 14 streams without the host cache lost; we know of no report of 14 streams with it other than ours. A single leaderboard run is inside the noise of §5.1, so this is consistent evidence, not proof. Combining 14 streams with D′ (each estimated at +1 to +2 alone) produced `dp14`: **50.46** on demo 25×4 vs. 46.49 for the base and 47.84 for D′ alone — the only change that cleared our acceptance line. That is the best of six evaluations (§5.2), and the leaderboard does not confirm it (Figure 1), so the score gain is unproven; the throughput gain is measured. Throughput measures compute, not score: the fastest evaluation of all (671 tok/s, §6.4) scored 44.54.
+Beyond 14 streams the GPU saturates (KV utilisation near its limit), so we stopped there. The host-memory cache appears to be what makes 14 streams pay. Liang raised the stream count from 10 to 14 *without* it and lost 17 points (29.90 vs 47.30); generated throughput fell from ≈610 to ≈280 tok/s late in the run as growing contexts no longer fit in GPU KV memory. That run was on a different machine with slower disk, so the comparison is suggestive, not controlled. Provorov's leaderboard test points the same way: 14 requests *without* the host cache scored 21.49, against 28.04 for the unchanged base submitted the day before, although a bench without games had shown +10.5% throughput. Both reports of 14 streams without the host cache lost; we know of no report of 14 streams with it other than ours. A single leaderboard run is inside the noise of §5.1, so this is consistent evidence, not proof. Combining 14 streams with D′ (each estimated at +1 to +2 alone) produced `dp14`: **50.46** on demo 25×4 vs. 46.49 for the base and 47.84 for D′ alone — the only change that cleared our acceptance line. That is the best of six evaluations (§5.2), and the leaderboard does not confirm it (Figure 1), so the score gain is unproven; the throughput gain is measured. Throughput measures compute, not score: the fastest evaluation of all (671 tok/s, §6.4) scored 44.54. §6.5 gives the exchange rate between the two.
 
 ### 6.3 Where the tokens go
 
@@ -141,7 +141,7 @@ Context loss at trimming looked like the obvious bottleneck, and the harness sup
 | | dp14 | appended | replacing |
 |---|---|---|---|
 | Demo 25×4 mean | 50.46 | **43.96** | **44.54** |
-| Levels cleared / runs won | 431 / 33 | — / 33 | 375 / 30 |
+| Levels cleared / runs won | 431 / 33 | 348 / 33 | 375 / 30 |
 | Actions | 21,166 | 14,415 | 14,432 |
 | Generated tokens | 18.84M | 13.24M | 19.70M |
 | Generated tokens per action | 890 | 918 | **1,365** |
@@ -180,7 +180,37 @@ Three limits apply. The appended design has the same Python persistence and no e
 
 **How sure are we?** Neither drop is established. Against `dp14`, a game-level bootstrap gives −6.51 (95% CI −15.2 to +0.9) and −5.93 (−13.2 to +1.6), and `dp14` is the best of six evaluations (§5.2), so these differences are biased upward in size. Against the base they are −2.5 and −2.0. What is measured precisely is the mechanism (prefill, throughput, tokens per action), not the score effect.
 
-### 6.5 Other rejected changes
+### 6.5 What a compute budget buys (post-hoc analysis)
+
+Actions obey an identity: `actions = time × r / c`, with r generated tokens per second and c generated tokens per action. Against `dp14`, r/c falls by 32% for the appended design (r: 449 vs 639) and by 32% for the replacing design (c: 1,365 vs 890), which is why they made the same number of actions by different routes. To price that loss we replayed `dp14` under D′ with the deadline scaled (`analysis/budget_curve.py`). The scheduler knows the new deadline, and each point averages five nearby deadlines and three stitching seeds, because the replay is chaotic in the budget.
+
+| Budget (relative to `dp14`) | 60% | 70% | 80% | 90% | 100% | 110% | 130% |
+|---|---|---|---|---|---|---|---|
+| Replay | 35.66 | 41.39 | 45.14 | 48.92 | 50.58 | 52.94 | 56.58 |
+| The real `dp14` run, cut at that time | 35.81 | 40.60 | 44.17 | 47.80 | 50.46 | — | — |
+
+The replay and the real run cut early agree within 1.1 points, with no fitting. Above 100% the curve rests on stitching alone and is unvalidated.
+
+![Figure 2. Replay of dp14 under scaled budgets, real early cuts of the same run, and the three actual evaluations.](fig/budget_curve.png)
+
+*Figure 2. What a budget buys. The line is the replay of `dp14` with a scaled deadline (dashed above 100%: stitching only); open circles are the real run cut early; bars are ±2.2 for one evaluation. The appended design sits on the curve. The replacing design spent more tokens than `dp14` and scored like a 77% budget (arrow).*
+
+**Compute is far from saturated.** A cut of 10% costs 1.7 points, 20% costs 5.4, 30% costs 9.2 and 40% costs 14.9. This corrects an earlier draft, which read "−10% costs 1.6" as a sufficient budget. Allocation has little left (§6.1), but total compute does not: it is worth about 0.2–0.3 points per 1%. Two consequences follow. The measured +10.5% throughput (§6.2) is worth ≈ +1.5 points, far below what one evaluation can see, and close to the +1.67 of Figure 1 (which proves nothing by itself). And a visible 5-point gain corresponds to ≈ 20–25% more effective compute.
+
+| Against the replay of `dp14` at | Budget | Replay | Actual | Gap (95% CI, game bootstrap) |
+|---|---|---|---|---|
+| Appended, equal tokens | 70% | 41.62 | 43.96 | +2.3 (−3.7 to +8.1) |
+| Replacing, equal tokens | 105% | 51.65 | 44.54 | −7.1 (−14.7 to +0.7) |
+| Appended, equal actions | 62.5% | 37.42 | 43.96 | +6.5 (−1.7 to +16.3) |
+| Replacing, equal actions | 62.5% | 37.42 | 44.54 | +7.1 (−3.3 to +19.0) |
+
+**The appended design's loss needs no cause beyond compute.** At 70% of the tokens the replay predicts 41.62 and the design scored 43.96. So our first explanation (§6.4) stands for that design; what failed was its extension to the prediction that a prefix-stable design would recover the score. Without the simulator the check points the same way: the three evaluations without memory, cut at 13.24M tokens, stand at 39.70, 38.69 and 40.60 (below the replay, because a run cut early never reached its end-game scheduling).
+
+**The replacing design paid the same bill elsewhere.** It spent 105% of the tokens and scored what `dp14` would score with 77%. It lies between its two bounds: if re-checking tokens were worth nothing it would sit at the equal-actions value (37.42), and if they were worth as much as `dp14`'s it would sit at the equal-tokens value (51.65). The point estimate is about half way.
+
+**Limits.** We did this after seeing the results. Every interval includes zero. `dp14` is the best of six evaluations, so the curve is probably too high by a few points, which would widen the appended design's lead and narrow the replacing design's deficit. The curve assumes that progress depends only on tokens and actions, and that tokens removed from one design would be worth what they were worth in `dp14`. Equal actions uses the replay's action count, which is approximate where runs were stitched.
+
+### 6.6 Other rejected changes
 
 | Change | Result |
 |---|---|
@@ -200,7 +230,7 @@ From mid-October, model loading on the evaluation machines slowed from ≈5 to �
 ## 8. Discussion: what this implies for reaching 85%
 
 - **Evaluation is the bottleneck.** With per-game SD ≈ 16.5, a change must be worth ≈5 points to be seen in one 8-hour evaluation. Most published tweaks are worth 1–2. Progress requires either more evaluations, held-out game sets (e.g. independent parametric game collections), or mechanism-level proxies such as throughput and token accounting.
-- **Allocation is nearly exhausted** in this harness: even a future-knowing oracle gains only ≈ +2.7, and apparent scheduler gains are fitted noise.
+- **Allocation is nearly exhausted** in this harness: even a future-knowing oracle gains only ≈ +2.7, and apparent scheduler gains are fitted noise. **Total compute is not:** it is worth ≈ 0.2–0.3 points per 1% (§6.5), so a replay curve turns a mechanism measurement into a predicted score, without the noise of an evaluation.
 - **The remaining headroom is in solving ability**, i.e. what the model learns per token — not in how tokens are distributed. Provorov's split of 132 runs agrees: 46.5% of the attainable score lies in levels never reached, 10.5% in the level where the run stopped and only 2.5% in extra actions on cleared levels; and 93% of level clears happen within the first 70,000 tokens spent on the level. Memory mechanisms must be judged by what they cost in prefill and in reasoning per action, not by the information they keep or their length.
 - **Robustness is part of the score.** A long-start-up failure turned a 30-point agent into 0.00 four times out of ten; harnesses should treat platform latency as an adversary.
 
@@ -208,11 +238,11 @@ From mid-October, model loading on the evaluation machines slowed from ≈5 to �
 
 ## 9. Conclusion
 
-We did not build a new ARC-AGI-3 solver. We measured how much the dominant public solver's scores vary, built a simulator that replays its scheduler to within 0.03 points, and used these to test our own changes. None of the five changes is distinguishable from the base by score, including the one we submitted, whose throughput gain is real but whose score gain the leaderboard does not confirm. Scheduler tuning turned out to be overfitting. Appended summaries are a compute trap, and removing that trap did not bring the score back, which falsified our own explanation. A keep-alive addresses a 0-point failure mode but was never verified in a scored run. The main message is methodological: on ARC-AGI-3 today, **most proposed improvements are smaller than the noise, so judge a change by the mechanism you can measure, and let your predictions fail.**
+We did not build a new ARC-AGI-3 solver. We measured how much the dominant public solver's scores vary, built a simulator that replays its scheduler to within 0.03 points, and used these to test our own changes. None of the five changes is distinguishable from the base by score, including the one we submitted, whose throughput gain is real but whose score gain the leaderboard does not confirm. Scheduler tuning turned out to be overfitting. Appended summaries are a compute trap, and removing that trap did not bring the score back, which falsified our own prediction: the same budget went to re-checking instead of prefill. Allocation is nearly exhausted, but total compute is not, at 0.2–0.3 points per 1%. A keep-alive addresses a 0-point failure mode but was never verified in a scored run. The main message is methodological: on ARC-AGI-3 today, **most proposed improvements are smaller than the noise, so judge a change by the mechanism you can measure, and let your predictions fail.**
 
 ## Reproducibility and license
 
-- Code: notebooks and tools in https://github.com/cacco2010-maker/arc3-measuring-before-improving : `_make_nb.py` (variant generator), `sim/` (replay simulator: `build_dataset.py`, `timing.py`, `sim.py`, `search.py`, `eval_all.py`), `_keepalive_cell.py`, `_no_trial_cell.py`.
+- Code: notebooks and tools in https://github.com/cacco2010-maker/arc3-measuring-before-improving : `_make_nb.py` (variant generator), `sim/` (replay simulator: `build_dataset.py`, `timing.py`, `sim.py`, `search.py`, `eval_all.py`), `analysis/` (`memory_cost.py` for §5.2 and §6.4, `budget_curve.py` for §6.5), `_keepalive_cell.py`, `_no_trial_cell.py`.
 - License: the Kaggle notebook is public under Apache-2.0 (Kaggle's licence for public notebooks); our tools outside it CC0, except the third-party formulas re-implemented in `sim/` (Apache-2.0; see NOTICE in the repository).
 - Third-party code:
   - dfranzen's harness patches and serving builder: Apache-2.0 (github da-fr/arc-agi-3-solution, a fork of Tufalabs/duck-harness). The Kaggle copies (`dfranzen/taaf-kaggle-source-bundle-copy`, `dfranzen/pennyroyal-v253`) are listed as "unknown"; the wheelhouse states that bundled packages keep their upstream licenses.
